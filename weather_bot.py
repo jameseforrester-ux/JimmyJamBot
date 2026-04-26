@@ -39,9 +39,8 @@ MODELS = {
     "gem":           ("gem_seamless",            0.08),
 }
 
-# Alert threshold: how many degrees change triggers a Polymarket alert
-ALERT_THRESHOLD_F = 2.0   # Fahrenheit
-ALERT_THRESHOLD_C = 1.1   # Celsius
+# Alert thresholds per day — tighter for today/tomorrow, looser for day after
+ALERT_THRESHOLDS_F = {0: 1.0, 1: 1.0, 2: 2.0}
 
 # How often to check (seconds) — 3600 = 1 hour
 MONITOR_INTERVAL = 3600
@@ -51,6 +50,21 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+
+def ftoc(f: float) -> float:
+    """Convert Fahrenheit to Celsius, rounded to 1 decimal."""
+    return round((f - 32) * 5 / 9, 1)
+
+
+def fmt_temp(f: float) -> str:
+    """Format a temperature in both °F and °C."""
+    return f"{f}°F / {ftoc(f)}°C"
+
+
+def fmt_range(lo: float, hi: float) -> str:
+    """Format a temp range in both units."""
+    return f"{lo}–{hi}°F / {ftoc(lo)}–{ftoc(hi)}°C"
 
 
 # ─── OPEN-METEO API ──────────────────────────────────────────────────────────
@@ -220,7 +234,7 @@ def probability_analysis(model_details: dict, day_idx: int) -> dict:
 def build_forecast_message(location: dict, blended: dict, model_details: dict, dates: list) -> str:
     """Build the full formatted Telegram message."""
     day_labels = ["📅 TODAY", "📅 TOMORROW", "📅 DAY AFTER"]
-    margin_note = ["±1°F (high confidence)", "±3°F (planning range)", "±3°F (planning range)"]
+    margin_note = ["±1°F/0.6°C (high confidence)", "±3°F/1.7°C (planning range)", "±3°F/1.7°C (planning range)"]
 
     lines = [
         f"🌡 *EDGE Weather Intelligence*",
@@ -237,8 +251,10 @@ def build_forecast_message(location: dict, blended: dict, model_details: dict, d
 
         lines.append(f"{'─'*28}")
         lines.append(f"*{day_labels[i]}* — {date_str}")
-        lines.append(f"🔴 High: *{b['high_range'][0]}–{b['high_range'][1]}°F* ({b['high']}°F center)")
-        lines.append(f"🔵 Low:  *{b['low_range'][0]}–{b['low_range'][1]}°F* ({b['low']}°F center)")
+        lines.append(f"🔴 High: *{fmt_range(b['high_range'][0], b['high_range'][1])}*")
+        lines.append(f"   Center: {fmt_temp(b['high'])}")
+        lines.append(f"🔵 Low:  *{fmt_range(b['low_range'][0], b['low_range'][1])}*")
+        lines.append(f"   Center: {fmt_temp(b['low'])}")
         lines.append(f"📐 Range: {margin_note[i]}")
         if prob:
             lines.append(f"🎯 High confidence: *{prob['prob_high']}%* | Low: *{prob['prob_low']}%*")
@@ -259,34 +275,41 @@ def build_forecast_message(location: dict, blended: dict, model_details: dict, d
         if d["max"]:
             label = model_emojis.get(name, name.upper())
             weight_pct = int(MODELS[name][1] * 100)
-            lines.append(f"{label} ({weight_pct}% weight): *{d['max'][0]}°F* high / *{d['min'][0]}°F* low")
+            lines.append(
+                f"{label} ({weight_pct}%): "
+                f"*{fmt_temp(d['max'][0])}* H / *{fmt_temp(d['min'][0])}* L"
+            )
 
     lines.append(f"\n⚡ _Data: Open-Meteo · ECMWF IFS025 · GFS · ICON · MF · GEM_")
     return "\n".join(lines)
 
 
 def build_alert_message(location: dict, old_blended: dict, new_blended: dict, day_idx: int, date_str: str) -> str:
-    """Build the Polymarket change alert."""
+    """Build the Polymarket change alert with both C and F."""
     day_labels = {0: "TODAY", 1: "TOMORROW", 2: "DAY AFTER"}
+    threshold  = ALERT_THRESHOLDS_F[day_idx]
     ob = old_blended[day_idx]
     nb = new_blended[day_idx]
     delta_high = round(nb["high"] - ob["high"], 1)
     delta_low  = round(nb["low"]  - ob["low"],  1)
-    direction_high = "🔺" if delta_high > 0 else "🔻"
-    direction_low  = "🔺" if delta_low  > 0 else "🔻"
+    delta_high_c = round(delta_high * 5 / 9, 1)
+    delta_low_c  = round(delta_low  * 5 / 9, 1)
+    dir_h = "🔺" if delta_high > 0 else "🔻"
+    dir_l = "🔺" if delta_low  > 0 else "🔻"
 
     return (
         f"⚠️ *EDGE FORECAST CHANGE ALERT*\n"
         f"📍 *{location['name']}*\n"
-        f"📅 *{day_labels.get(day_idx, '')}* — {date_str}\n\n"
+        f"📅 *{day_labels.get(day_idx, '')}* — {date_str}\n"
+        f"_(Alert threshold: ≥{threshold}°F / {round(threshold*5/9,1)}°C)_\n\n"
         f"*HIGH TEMP CHANGED:*\n"
-        f"  Was: {ob['high_range'][0]}–{ob['high_range'][1]}°F\n"
-        f"  Now: {nb['high_range'][0]}–{nb['high_range'][1]}°F\n"
-        f"  {direction_high} Shift: {delta_high:+.1f}°F\n\n"
+        f"  Was: {fmt_range(ob['high_range'][0], ob['high_range'][1])}\n"
+        f"  Now: {fmt_range(nb['high_range'][0], nb['high_range'][1])}\n"
+        f"  {dir_h} Shift: {delta_high:+.1f}°F / {delta_high_c:+.1f}°C\n\n"
         f"*LOW TEMP CHANGED:*\n"
-        f"  Was: {ob['low_range'][0]}–{ob['low_range'][1]}°F\n"
-        f"  Now: {nb['low_range'][0]}–{nb['low_range'][1]}°F\n"
-        f"  {direction_low} Shift: {delta_low:+.1f}°F\n\n"
+        f"  Was: {fmt_range(ob['low_range'][0], ob['low_range'][1])}\n"
+        f"  Now: {fmt_range(nb['low_range'][0], nb['low_range'][1])}\n"
+        f"  {dir_l} Shift: {delta_low:+.1f}°F / {delta_low_c:+.1f}°C\n\n"
         f"💡 *ACTION REQUIRED:* Review your Polymarket temperature positions for {location['name']}.\n"
         f"🕐 Detected at {datetime.now().strftime('%H:%M')} — next check in 1 hour."
     )
@@ -310,8 +333,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "`/weather KDEN`\n"
         "`/weather Tokyo`\n"
         "`/monitor KBKF`\n\n"
-        "⚡ Current day: ±1°F range | Next 2 days: ±3°F range\n"
-        "🎯 ECMWF weighted at 40% · alerts fire on ≥2°F shift"
+        "⚡ Current day: ±1°F/0.6°C | Next 2 days: ±3°F/1.7°C\n"
+        "🎯 ECMWF weighted at 40% · Today/Tomorrow alerts: ≥1°F · Day After: ≥2°F"
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
@@ -424,7 +447,9 @@ async def start_monitoring(update_or_query, ctx, query, chat_id):
     monitoring_notice = (
         f"\n\n{'─'*28}\n"
         f"📡 *MONITORING ACTIVE*\n"
-        f"Checking every hour. You'll receive an alert if the forecast shifts ≥{ALERT_THRESHOLD_F}°F.\n"
+        f"Checking every hour. Alert thresholds:\n"
+        f"  • Today & Tomorrow: ≥1°F / 0.6°C shift\n"
+        f"  • Day After: ≥2°F / 1.1°C shift\n"
         f"Type /stop `{query}` to cancel."
     )
 
@@ -458,6 +483,7 @@ async def monitor_job(ctx: ContextTypes.DEFAULT_TYPE):
             if day_idx not in old_blended or day_idx not in new_blended:
                 continue
 
+            threshold = ALERT_THRESHOLDS_F[day_idx]
             old_high = old_blended[day_idx]["high"]
             new_high = new_blended[day_idx]["high"]
             old_low  = old_blended[day_idx]["low"]
@@ -466,7 +492,7 @@ async def monitor_job(ctx: ContextTypes.DEFAULT_TYPE):
             delta_high = abs(new_high - old_high)
             delta_low  = abs(new_low  - old_low)
 
-            if delta_high >= ALERT_THRESHOLD_F or delta_low >= ALERT_THRESHOLD_F:
+            if delta_high >= threshold or delta_low >= threshold:
                 date_str = dates[day_idx].strftime("%a %b %d") if day_idx < len(dates) else ""
                 alert_text = build_alert_message(location, old_blended, new_blended, day_idx, date_str)
                 await ctx.bot.send_message(
@@ -493,14 +519,53 @@ async def cmd_watching(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     active = {k: v for k, v in monitoring.items() if v["chat_id"] == chat_id}
 
     if not active:
-        await update.message.reply_text("📡 No locations currently being monitored.\nUse `/monitor <location>` to start.", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(
+            "📡 No locations currently being monitored.\nUse `/monitor <location>` to start.",
+            parse_mode=ParseMode.MARKDOWN
+        )
         return
 
-    lines = ["📡 *Currently Monitoring:*\n"]
-    for job_key, data in active.items():
-        started = datetime.fromisoformat(data["started"]).strftime("%b %d %H:%M")
-        lines.append(f"• *{data['location']['name']}*\n  Started: {started}\n  Stop: `/stop {data['query']}`")
+    lines = ["📡 *Active Monitors — ECMWF Forecast*\n"]
 
+    day_labels = ["Today", "Tomorrow", "Day After"]
+
+    for job_key, data in active.items():
+        started  = datetime.fromisoformat(data["started"]).strftime("%b %d %H:%M")
+        location = data["location"]
+        blended  = data.get("blended", {})
+        model_details = data.get("model_details", {})
+
+        lines.append(f"📍 *{location['name']}*")
+        lines.append(f"   Started: {started}")
+
+        # ECMWF-specific values (fall back to blended if not available)
+        ecmwf = model_details.get("ecmwf", {})
+        ecmwf_maxes = ecmwf.get("max", [])
+        ecmwf_mins  = ecmwf.get("min", [])
+
+        for i, label in enumerate(day_labels):
+            if i not in blended:
+                continue
+            b = blended[i]
+            prob = probability_analysis(model_details, i)
+            prob_h = prob.get("prob_high", "?") if prob else "?"
+            prob_l = prob.get("prob_low",  "?") if prob else "?"
+
+            # Use ECMWF values if available, else blended center
+            ecmwf_h = ecmwf_maxes[i] if i < len(ecmwf_maxes) else b["high"]
+            ecmwf_l = ecmwf_mins[i]  if i < len(ecmwf_mins)  else b["low"]
+
+            lines.append(
+                f"   *{label}:*\n"
+                f"     🔴 H: {fmt_temp(ecmwf_h)} (ECMWF) · {prob_h}% confidence\n"
+                f"     🔵 L: {fmt_temp(ecmwf_l)} (ECMWF) · {prob_l}% confidence\n"
+                f"     📊 Blended range: {fmt_range(b['high_range'][0], b['high_range'][1])} H"
+            )
+
+        lines.append(f"   🛑 Stop: `/stop {data['query']}`")
+        lines.append("")
+
+    lines.append("_Forecasts last updated on most recent hourly check_")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 
