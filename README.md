@@ -1,153 +1,206 @@
-# EDGE Weather Intelligence Bot — Setup Guide
+# ✈️ Weather Forecast Telegram Bot
 
-Predicts temperature outcomes using ECMWF (40% weight) blended with GFS, ICON,
-Météo-France, and GEM. Monitors hourly and sends Polymarket alerts on ≥2°F shifts.
+A Telegram bot that delivers **high-confidence temperature forecasts** for any airport or city worldwide, using:
 
----
+- **METAR / TAF** (Aviation Weather Center)
+- **ECMWF IFS** (best global model)
+- **GFS 0.25°** (NOAA)
+- **Canadian GEM**
+- **JMA** (Japan Meteorological Agency)
+- **GraphCast-weighted blend** (Google AI model via Open-Meteo)
+- **Polymarket** live prediction market odds
 
-## ① Get a Bot Token (2 minutes)
-
-1. Open Telegram → search **@BotFather**
-2. Send `/newbot`
-3. Pick a name (e.g. "EDGE Weather") and username (e.g. `edge_weather_xyzbot`)
-4. BotFather gives you a token like: `7123456789:AAFxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`
-5. Copy it — you'll need it below
-
----
-
-## ② Install Python (if not installed)
-
-**Windows:** Download from https://python.org/downloads — tick "Add to PATH"
-**Mac:**     `brew install python3`  or download from python.org
-**Linux:**   `sudo apt install python3 python3-pip`
+All forecasts are shown in the **station's local date and time**, not yours.
 
 ---
 
-## ③ Install Dependencies
+## Features
 
-Open Terminal / PowerShell **in the folder containing this README**, then run:
+| Feature | Detail |
+|---|---|
+| Multi-model consensus | 5 models averaged + 85% confidence interval |
+| ±2°F probability | % of models agreeing within 2°F of best bet |
+| METAR current obs | Real-time temp, wind, visibility, raw string |
+| TAF max temp | Parsed from TX group |
+| Polymarket odds | Live market prices + BUY/AVOID recommendations |
+| Hourly monitoring | Checks for forecast drift every 60 minutes |
+| Change alerts | Instant alert if high or low shifts ≥2°F |
+| Local timezone | All dates/times shown in station's local TZ |
+
+---
+
+## Bot Commands
 
 ```
+/forecast <airport or city>   — Get full forecast immediately
+/monitor <airport or city>    — Start hourly monitoring + alerts
+/stopmonitor <airport or city> — Stop monitoring a station
+/list                         — List all monitored stations
+/help                         — Show help
+```
+
+**Examples:**
+```
+/forecast KDEN
+/forecast KBKF
+/forecast Hong Kong
+/forecast London Heathrow
+/monitor KATL
+/monitor Miami
+/stopmonitor KATL
+```
+
+---
+
+## VPS Deployment
+
+### Prerequisites
+- Ubuntu 20.04+ VPS
+- Python 3.10+
+- Git
+
+### 1. Clone the repo
+
+```bash
+git clone https://github.com/YOUR_USERNAME/weather-forecast-bot.git
+cd weather-forecast-bot
+```
+
+### 2. Create virtual environment
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
----
+### 3. Run manually (test)
 
-## ④ Add Your Token
-
-Open `weather_bot.py` in any text editor (Notepad, VSCode, etc.)
-
-Find this line near the top:
-```python
-BOT_TOKEN = os.getenv("BOT_TOKEN", "PASTE_YOUR_BOT_TOKEN_HERE")
+```bash
+python bot.py
 ```
 
-Replace `PASTE_YOUR_BOT_TOKEN_HERE` with your actual token:
-```python
-BOT_TOKEN = os.getenv("BOT_TOKEN", "7123456789:AAFxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+Test by sending `/start` to your bot in Telegram.
+
+### 4. Run as a systemd service (production)
+
+```bash
+# Copy files to /opt
+sudo cp -r . /opt/weather-forecast-bot
+sudo chown -R ubuntu:ubuntu /opt/weather-forecast-bot
+
+# Rebuild venv in /opt
+cd /opt/weather-forecast-bot
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# Install and start the service
+sudo cp weather-bot.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable weather-bot
+sudo systemctl start weather-bot
+
+# Check status
+sudo systemctl status weather-bot
+
+# View logs
+sudo journalctl -u weather-bot -f
 ```
-
-Save the file.
-
----
-
-## ⑤ Run the Bot
-
-```
-python weather_bot.py
-```
-
-You should see:
-```
-🌡 EDGE Weather Bot running…
-```
-
-Keep this Terminal window open while using the bot. It runs locally on your machine.
-
----
-
-## ⑥ Use the Bot
-
-Open Telegram → find your bot by its username → send:
-
-| Command | What it does |
-|---------|-------------|
-| `/weather Denver` | 3-day forecast with probability % |
-| `/weather Buckley Air Force Base` | Same for specific station |
-| `/weather KDEN` | Works with ICAO codes |
-| `/weather KBKF` | Buckley Space Force Base (built-in) |
-| `/monitor KBKF` | Hourly check, alerts on ≥2°F shift |
-| `/watching` | List all active monitors |
-| `/stop Denver` | Stop monitoring Denver |
-| `/stopall` | Stop everything |
-
-You can also just **type any location name** without a command and it will look it up.
 
 ---
 
-## How the Forecast Works
+## Configuration (`config.py`)
 
-**Today (Day 0):** ±1°F range — high confidence, tight bound
-**Tomorrow + Day After:** ±3°F range — planning range
-
-**Model Weights:**
-- 🇪🇺 ECMWF IFS025 — **40%** (primary, best global accuracy)
-- 🇺🇸 GFS — 20%
-- 🇩🇪 ICON — 20%
-- 🇫🇷 Météo-France — 12%
-- 🇨🇦 GEM — 8%
-
-**Probability scores** are calculated from cross-model standard deviation.
-Low spread = high agreement = high probability shown.
+| Setting | Default | Description |
+|---|---|---|
+| `BOT_TOKEN` | (set) | Your Telegram bot token |
+| `CHECK_INTERVAL_SECONDS` | `3600` | How often to poll for changes (1 hour) |
+| `TEMP_ALERT_THRESHOLD_F` | `2.0` | Alert if forecast shifts this many °F |
+| `PROB_WINDOW_F` | `2.0` | Window for "prob within ±2°F" stat |
 
 ---
 
-## Polymarket Alert Logic
+## Data Sources
 
-When monitoring is active, every hour the bot:
-1. Re-fetches all 5 models
-2. Computes new blended forecast
-3. Compares to the baseline (first fetch)
-4. If high OR low shifts ≥2°F → sends alert to your chat
+### Weather Models (via Open-Meteo — free, no API key)
+| Model | Provider | Resolution |
+|---|---|---|
+| ECMWF IFS | European Centre for Medium-Range Weather | 0.4° |
+| GFS | NOAA / NWS | 0.25° |
+| GEM | Environment Canada | Seamless |
+| JMA | Japan Meteorological Agency | Seamless |
+| GraphCast blend | Google AI + Open-Meteo best_match | — |
 
-The alert tells you exactly what changed and which day, so you know
-whether to adjust your temperature position on Polymarket.
+### METAR / TAF
+- **Aviation Weather Center** (`aviationweather.gov`) — free, no key required
+- Supports all ICAO station codes worldwide
+
+### Polymarket
+- **Gamma API** — public, no key required
+- Searches for active temperature markets matching location + date
+- Recommends BUY positions aligned with model best bet
 
 ---
 
-## Running 24/7 (optional)
+## How Probability is Calculated
 
-To keep the bot running when you close your laptop:
+1. All 5 models are queried for daily max/min temperature
+2. Mean and standard deviation computed across models
+3. **Best bet** = ECMWF IFS value (if available) — best track record for global sites
+4. **85% CI** = mean ± 1.44 × std (approximate normal distribution)
+5. **Prob within ±2°F** = % of models whose forecast falls within 2°F of the mean
 
-**Free option — always-on PC:**
-Just leave the terminal open.
+---
 
-**VPS option (cheapest):**
-- Get a $4/mo VPS from Hetzner or DigitalOcean
-- Upload `weather_bot.py` and `requirements.txt`
-- Run: `nohup python weather_bot.py &`
+## Monitoring & Alerts
 
-**Windows background service:**
-Use Task Scheduler to run `python weather_bot.py` at startup.
+When you run `/monitor <location>`:
+- The bot fetches an initial forecast snapshot (best_bet high and low for today + tomorrow)
+- Every hour, it re-fetches and compares
+- If the best-bet high **or** low changes by ≥ 2°F, you get an alert with the old and new value
+
+Snapshot data is saved to `monitored_stations.json` and survives bot restarts.
+
+---
+
+## File Structure
+
+```
+weather-forecast-bot/
+├── bot.py                 # Main bot, command handlers, scheduler
+├── weather.py             # Geocoding, METAR/TAF, Open-Meteo multi-model
+├── polymarket.py          # Polymarket Gamma API + position recommendations
+├── formatter.py           # Telegram message formatting
+├── config.py              # Bot token, thresholds, API URLs
+├── requirements.txt       # Python dependencies
+├── weather-bot.service    # systemd service file
+└── README.md
+```
 
 ---
 
 ## Troubleshooting
 
-**"ModuleNotFoundError: No module named 'telegram'"**
-→ Run: `pip install -r requirements.txt`
-
-**"Conflict: terminated by other getUpdates request"**
-→ You have two copies of the bot running. Close one.
-
 **Bot not responding:**
-→ Check the terminal for errors. Make sure token is correct.
+```bash
+sudo journalctl -u weather-bot -n 50
+```
 
-**Location not found:**
-→ Try the ICAO code (e.g. KBKF instead of "Buckley")
-→ Or try the nearest city name
+**METAR not showing (city search):**
+METAR requires an ICAO code. Use `/forecast KJFK` instead of `/forecast New York` for full METAR/TAF data.
+
+**Polymarket shows no markets:**
+Not all locations/dates have active Polymarket temperature markets. This is normal.
+
+**Restarting after config change:**
+```bash
+sudo systemctl restart weather-bot
+```
 
 ---
 
-*Data provided by Open-Meteo (free, no API key needed)*
-*ECMWF data via open-meteo.com — CC BY 4.0*
+## License
+
+MIT
